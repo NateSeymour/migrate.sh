@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 
 # MIT License
-# 
+#
 # Copyright (c) 2023 Nathan Seymour
-# 
+#
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
 # in the Software without restriction, including without limitation the rights
 # to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 # copies of the Software, and to permit persons to whom the Software is
 # furnished to do so, subject to the following conditions:
-# 
+#
 # The above copyright notice and this permission notice shall be included in all
 # copies or substantial portions of the Software.
-# 
+#
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -126,7 +126,7 @@ mysql --version > /dev/null || die "MySQL not found!"
 openssl version > /dev/null || die "OpenSSL not found!"
 
 # Make migration directory
-mkdir -p "$DIR/migration"
+mkdir -p "$DIR/migration/.trash"
 
 # Configuration option
 SAMPLE_ENV_FILE=$(cat << EOF
@@ -140,7 +140,7 @@ EOF
 )
 
 if [[ "$1" == "configure" ]]; then
-    if [[ ! -f "$DIR/.migration.env" ]]; then 
+    if [[ ! -f "$DIR/.migration.env" ]]; then
         echo "Creating new configuration in '$DIR/.migration.env'..."
         echo "$SAMPLE_ENV_FILE" > "$DIR/.migration.env"
         echo "Be sure to add .migration.env to your .gitignore file!"
@@ -151,7 +151,7 @@ if [[ "$1" == "configure" ]]; then
 
 		printf "\n"
         cat "$DIR/.migration.env"
-		printf "\n" 
+		printf "\n"
 
         echo "Delete it to create a new one!"
 
@@ -210,10 +210,9 @@ EOF
 # init.sql
 INIT=$(cat << EOF
 CREATE TABLE __migration (
-    version INTEGER PRIMARY KEY AUTO_INCREMENT,
+    version DATETIME NOT NULL PRIMARY KEY,
     name VARCHAR(50) NOT NULL,
     relative_path VARCHAR(200) NOT NULL,
-    creation_date DATETIME NOT NULL,
     applied BOOLEAN NOT NULL,
     application_hash VARCHAR(100),
     ext INTEGER UNSIGNED
@@ -224,12 +223,14 @@ EOF
 # Routines
 run_sql_file() {
 	mysql --batch -sN -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" < "$1" || die "Failed to execute file '$1'"
-	return $?
 }
 
 run_sql_query() {
 	mysql --batch -sN -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" -e "$1" || die "Failed to execute query '$1'"
-	return $?
+}
+
+run_pretty_sql_query() {
+	mysql -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" -e "$1" || die "Failed to execute query '$1'"
 }
 
 get_current_version() {
@@ -249,7 +250,6 @@ get_next_version() {
 	VERSION=$(run_sql_query "SELECT MIN(version) FROM __migration WHERE applied=false;")
 
 	if [[ "$VERSION" == "NULL" ]]; then
-		get_current_version
 		return 1
 	else
 		echo "$VERSION"
@@ -265,7 +265,12 @@ calculate_file_hash() {
 }
 
 print_db_version() {
-	CURRENT_VERSION=$(get_current_version) || die "Unable to get the current version. What the hell did you do to my database?"
+	CURRENT_VERSION=$(get_current_version)
+
+	if [[ "$?" -ne 0 ]]; then
+		echo "Database schema at v0. No migrations have been applied. Try running '$0 up'"
+		return
+	fi
 
 	MIGRATION=$(run_sql_query "SELECT version, name, relative_path, application_hash FROM __migration WHERE version='$CURRENT_VERSION'")
 	IFS=$'\t' read -r VERSION NAME RELATIVE_PATH APPLICATION_HASH <<< "$MIGRATION"
@@ -332,25 +337,57 @@ do_migration_down() {
 	run_sql_query "$MIGRATION_DOWN"
 
 	# Log migration in DB
-	run_sql_query "UPDATE __migration SET applied=false, application_hash='$MIGRATION_HASH' WHERE version='$VERSION';"
+	run_sql_query "UPDATE __migration SET applied=false, application_hash='' WHERE version='$VERSION';"
 
 	# Inform user
 	echo "Successfully downgraded migration v$VERSION '$NAME' with hash SHA256($MIGRATION_HASH)"
 	print_db_version
 }
 
+autodiscover_migrations() {
+	for i in "$DIR"/migration/*.sql; do
+		MIGRATION_NAME_FULL=$(basename -s ".sql" "$i")
+		IFS=$'_' read -ra MIGRATION_PARTS <<< "$MIGRATION_NAME_FULL"
+
+		MIGRATION_VERSION="${MIGRATION_PARTS[0]}"
+		MIGRATION_NAME="${MIGRATION_PARTS[1]}"
+
+		MIGRATION_EXISTS=$(run_sql_query "SELECT * FROM __migration WHERE name='$MIGRATION_NAME'")
+
+		if [[ -n "$MIGRATION_EXISTS" ]]; then
+			continue
+		fi
+
+		NEWER_MIGRATIONS=$(run_sql_query "SELECT version, name FROM __migration WHERE applied=true AND version > '$MIGRATION_VERSION'")
+
+		if [[ -n "$NEWER_MIGRATIONS" ]]; then
+			echo "The following migrations are currently applied and newer than $MIGRATION_NAME_FULL:"
+			echo "$NEWER_MIGRATIONS"
+			die "Cannot add old migration! Try rolling back the database!"
+		fi
+
+		run_sql_query "INSERT INTO __migration(version, name, relative_path, applied) VALUES('$MIGRATION_VERSION', '$MIGRATION_NAME', 'migration/$MIGRATION_NAME_FULL.sql', false)"
+
+		echo -e "Autodiscovered ${Green}$MIGRATION_NAME_FULL${Color_Off}"
+	done
+}
+
 print_usage() {
-	echo "Usage: $0 {init|create <name>|up|down|updown|update|version}"
+	echo "Usage: $0 [command] [args]"
 
 	cat << EOM
 Commands:
 	- init              Initialize the migration table in database
-    - configure         Create an empty config file (.migration.env)
+	- configure         Create an empty config file (.migration.env)
 	- create <name>     Create a new migration
+	- delete <name>     Delete a migration. MUST NOT BE APPLIED.
+	- discover          Scan for untracked migrations in migration directory (Automatically performed on 'up')
 	- up                Apply the next (single) migration
 	- down              Undo one migration
-	- updown            Apply and immediately undo migration. (For testing)
+	- updown            Apply and immediately undo migration (For testing)
 	- version           Print the current database version
+	- list              Show all migrations saved in the database
+	- usage             Show this list
 EOM
 }
 
@@ -376,7 +413,7 @@ case "$1" in
 			die "You must provide a name for the new migration!"
 		fi
 
-		TIMESTAMP=$(date '+%Y%m%d%H%M%S')
+		TIMESTAMP=$(date -u '+%Y%m%d%H%M%S')
 		MIGRATION_UID="${TIMESTAMP}_$MIGRATION_NAME"
 
 		MIGRATION_EXISTS=$(run_sql_query "SELECT version FROM __migration WHERE name='$MIGRATION_NAME'")
@@ -387,11 +424,46 @@ case "$1" in
 		RELATIVE_PATH="migration/${MIGRATION_UID}.sql"
 
 		echo "Creating migration '$MIGRATION_NAME' ($RELATIVE_PATH)..."
-		run_sql_query "INSERT INTO __migration(name, relative_path, creation_date, applied) VALUES('$MIGRATION_NAME', '$RELATIVE_PATH', '$TIMESTAMP', false);"
+		run_sql_query "INSERT INTO __migration(name, relative_path, version, applied) VALUES('$MIGRATION_NAME', '$RELATIVE_PATH', '$TIMESTAMP', false);"
 		echo "$MIGRATION_TEMPLATE" > "$DIR/$RELATIVE_PATH"
 		;;
 
+	delete)
+		MIGRATION_NAME="$2"
+
+		# Name must be valid
+		if [[ -z "$MIGRATION_NAME" ]]; then
+			die "Do you expect me to just know which migration you are deleting? You silly little goose, you!"
+		fi
+
+		MIGRATION=$(run_sql_query "SELECT version, name, relative_path, applied FROM __migration WHERE name='$MIGRATION_NAME'")
+		IFS=$'\t' read -r VERSION NAME RELATIVE_PATH APPLIED <<< "$MIGRATION"
+
+		if [[ -z "$VERSION" ]]; then
+			die "Are you trying to trick me by deleting a migration that does not exist? SHAME!"
+		fi
+
+		if [[ "$APPLIED" -eq 1 ]]; then
+			die "You cannot delete a migration that is currently applied. Do a rollback first, you impatient scoundrel!"
+		fi
+
+		mv "$DIR/$RELATIVE_PATH" "$DIR/migration/.trash"
+
+		run_sql_query "DELETE FROM __migration WHERE name='$NAME'"
+
+		echo -e "${Green}$NAME ($RELATIVE_PATH)${Color_Off} has been deleted and moved to migration/.trash"
+		;;
+
+	discover)
+		autodiscover_migrations
+		;;
+
+	list)
+		run_pretty_sql_query "SELECT * FROM __migration ORDER BY version"
+		;;
+
 	up)
+		autodiscover_migrations
 		do_migration_up
 		;;
 
@@ -406,6 +478,10 @@ case "$1" in
 
 	version)
 		print_db_version
+		;;
+
+	usage)
+		print_usage
 		;;
 
 	*)

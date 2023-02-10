@@ -85,19 +85,23 @@ Both work just as expected.
 ### Getting help
 
 ```BASH
-./migrate.sh
+./migrate.sh usage
 ```
 
 The usage screen prints:
 
 ```
-Usage: ./migrate.sh {init|create <name>|up|down|updown|update|version}
+Usage: ./migrate.sh [command] [args]
 Commands:
         - init              Initialize the migration table in database
         - configure         Create an empty config file (.migration.env)
         - create <name>     Create a new migration
+        - delete <name>     Delete a migration. MUST NOT BE APPLIED.
+        - discover          Scan for untracked migrations in migration directory (Automatically performed on 'up')
         - up                Apply the next (single) migration
         - down              Undo one migration
-        - updown            Apply and immediately undo migration. (For testing)
+        - updown            Apply and immediately undo migration (For testing)
         - version           Print the current database version
+        - list              Show all migrations saved in the database
+        - usage             Show this list
 ```

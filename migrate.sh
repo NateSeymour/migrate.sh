@@ -125,9 +125,6 @@ die() {
 mysql --version > /dev/null || die "MySQL not found!"
 openssl version > /dev/null || die "OpenSSL not found!"
 
-# Make migration directory
-mkdir -p "$DIR/migration/.trash"
-
 # Configuration option
 SAMPLE_ENV_FILE=$(cat << EOF
 # Database Migration
@@ -136,6 +133,7 @@ DB_PORT=
 DB_USER=
 DB_PASSWORD=
 DB_NAME=
+MIGRATION_DIR=
 EOF
 )
 
@@ -180,6 +178,34 @@ printf "$Color_Off"
 
 # Get the current configuration
 source .migration.env
+
+# Check for all required configs
+if [[ -z "$DB_HOST" ]]; then
+	die "Missing config key 'DB_HOST'"
+fi
+
+if [[ -z "$DB_PORT" ]]; then
+	die "Missing config key 'DB_PORT'"
+fi
+
+if [[ -z "$DB_USER" ]]; then
+	die "Missing config key 'DB_USER'"
+fi
+
+if [[ -z "$DB_PASSWORD" ]]; then
+	die "Missing config key 'DB_PASSWORD'"
+fi
+
+if [[ -z "$DB_NAME" ]]; then
+	die "Missing config key 'DB_NAME'"
+fi
+
+if [[ -z "$MIGRATION_DIR" ]]; then
+	die "Missing config key 'MIGRATION_DIR'"
+fi
+
+# Make migration directory
+mkdir -p "$DIR/$MIGRATION_DIR/.trash"
 
 # Files
 # - migration_template.sql
@@ -345,7 +371,7 @@ do_migration_down() {
 }
 
 autodiscover_migrations() {
-	for i in "$DIR"/migration/*.sql; do
+	for i in "$DIR"/$MIGRATION_DIR/*.sql; do
 		MIGRATION_NAME_FULL=$(basename -s ".sql" "$i")
 		IFS=$'_' read -ra MIGRATION_PARTS <<< "$MIGRATION_NAME_FULL"
 
@@ -366,7 +392,7 @@ autodiscover_migrations() {
 			die "Cannot add old migration! Try rolling back the database!"
 		fi
 
-		run_sql_query "INSERT INTO __migration(version, name, relative_path, applied) VALUES('$MIGRATION_VERSION', '$MIGRATION_NAME', 'migration/$MIGRATION_NAME_FULL.sql', false)"
+		run_sql_query "INSERT INTO __migration(version, name, relative_path, applied) VALUES('$MIGRATION_VERSION', '$MIGRATION_NAME', '$MIGRATION_DIR/$MIGRATION_NAME_FULL.sql', false)"
 
 		echo -e "Autodiscovered ${Green}$MIGRATION_NAME_FULL${Color_Off}"
 	done
@@ -421,7 +447,7 @@ case "$1" in
 			die "A migration by that name ($MIGRATION_NAME) already exists!"
 		fi
 
-		RELATIVE_PATH="migration/${MIGRATION_UID}.sql"
+		RELATIVE_PATH="$MIGRATION_DIR/${MIGRATION_UID}.sql"
 
 		echo "Creating migration '$MIGRATION_NAME' ($RELATIVE_PATH)..."
 		run_sql_query "INSERT INTO __migration(name, relative_path, version, applied) VALUES('$MIGRATION_NAME', '$RELATIVE_PATH', '$TIMESTAMP', false);"
@@ -447,7 +473,7 @@ case "$1" in
 			die "You cannot delete a migration that is currently applied. Do a rollback first, you impatient scoundrel!"
 		fi
 
-		mv "$DIR/$RELATIVE_PATH" "$DIR/migration/.trash"
+		mv "$DIR/$RELATIVE_PATH" "$DIR/$MIGRATION_DIR/.trash"
 
 		run_sql_query "DELETE FROM __migration WHERE name='$NAME'"
 

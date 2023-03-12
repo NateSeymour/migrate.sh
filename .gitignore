@@ -1,2 +1,5 @@
 .migration.env
-migration/*
+test-migration
+.vscode
+.DS_Store
+.idea

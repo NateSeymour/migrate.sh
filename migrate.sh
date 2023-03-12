@@ -177,7 +177,7 @@ fi
 printf "$Color_Off"
 
 # Get the current configuration
-source .migration.env
+source "$DIR/.migration.env"
 
 # Check for all required configs
 if [[ -z "$DB_HOST" ]]; then
